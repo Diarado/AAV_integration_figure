@@ -1,66 +1,21 @@
 library(ggplot2)
 library(dplyr)
+library(patchwork)
+
 chr_info <- read.table("sequence_report.tsv", header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
   filter(Role == "assembled-molecule", Chromosome.name %in% c(1:19, "X", "Y")) %>%
   select(Chromosome.name, Seq.length) %>%
   mutate(
     Chromosome = factor(Chromosome.name, levels = c(1:19, "X", "Y")),
-    length = as.numeric(Seq.length),
-    y_pos = as.numeric(Chromosome)
+    length = as.numeric(Seq.length)
   )
+
 data <- read.csv("integration_sites.csv", stringsAsFactors = FALSE) %>%
   select(Mouse, Host_Chromosome, Host_Start) %>%
   filter(!(Mouse != "Control" & (is.na(Host_Chromosome) | is.na(Host_Start)))) %>%
   mutate(Host_Chromosome_clean = gsub("^Chr", "", Host_Chromosome)) %>%
   left_join(chr_info, by = c("Host_Chromosome_clean" = "Chromosome.name"))
 
-# Filter chr_info to only chromosomes with integrations
-chr_with_integrations <- unique(data$Host_Chromosome_clean[!is.na(data$Host_Chromosome_clean)])
-chr_info_filtered <- chr_info %>%
-  filter(Chromosome.name %in% chr_with_integrations) %>%
-  mutate(y_pos = seq_len(n()))  # Re-assign y positions sequentially
-
-# Update y_pos in data to match filtered chromosome positions
-data <- data %>%
-  left_join(chr_info_filtered %>% select(Chromosome.name, y_pos_new = y_pos), 
-            by = c("Host_Chromosome_clean" = "Chromosome.name")) %>%
-  mutate(y_pos = y_pos_new) %>%
-  select(-y_pos_new)
-
-spread_close_positions <- function(data, threshold = 2e6, spread_distance = 1e6) {
-  valid_data <- data %>% filter(!is.na(y_pos))
-  
-  spread_data <- valid_data %>%
-    group_by(Host_Chromosome_clean) %>%
-    arrange(Host_Start) %>%
-    mutate(
-      group = cumsum(c(1, diff(Host_Start) > threshold)),
-      n_in_group = n(),
-      Host_Start_spread = if_else(
-        n_in_group > 1 & Host_Chromosome_clean == "13" & 
-          Host_Start > 63500000 & Host_Start < 63560000,
-        Host_Start + seq_along(Host_Start) * spread_distance - 
-          (n() + 1) * spread_distance / 2,
-        as.numeric(Host_Start)
-      )
-    ) %>%
-    group_by(Host_Chromosome_clean, group) %>%
-    mutate(
-      group_size = n(),
-      group_idx = row_number(),
-      Host_Start_visual = if_else(
-        Host_Chromosome_clean == "13" & 
-          Host_Start > 63500000 & Host_Start < 63560000 & group_size > 1,
-        mean(Host_Start) + (group_idx - (group_size + 1)/2) * spread_distance,
-        as.numeric(Host_Start)
-      )
-    ) %>%
-    ungroup()
-  
-  return(spread_data)
-}
-# Apply spreading
-data_spread <- spread_close_positions(data, threshold = 5000, spread_distance = 4e5)
 # Define all sample colors
 sample_colors <- c(
   "Control" = "black",
@@ -69,167 +24,169 @@ sample_colors <- c(
   "Cas9-sg6-158" = "#4DAF4A",
   "SN-16d-350" = "#984EA3"
 )
+
 # Create dummy control data for legend
 dummy_control <- data.frame(
   x = 0, y = 0, Mouse = "Control"
 )
+
+# Function to create a subplot for a single chromosome
+create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = FALSE) {
+  # Calculate the range with 10kb buffer
+  min_pos <- min(chr_data$Host_Start, na.rm = TRUE) - 1000
+  max_pos <- max(chr_data$Host_Start, na.rm = TRUE) + 1000
+  
+  # Ensure we don't go below 0
+  min_pos <- max(0, min_pos)
+  
+  p <- ggplot() +
+    # Chromosome bar showing only the relevant region
+    geom_rect(aes(xmin = min_pos/1000, xmax = max_pos/1000, 
+                  ymin = 0.5, ymax = 1.5),
+              fill = "grey80") +
+    
+    # Invisible dummy point for Control legend
+    geom_point(data = dummy_control,
+               aes(x = x, y = y, color = Mouse),
+               size = 0, alpha = 0, show.legend = show_legend) +
+    
+    # Actual integration site segments
+    geom_segment(data = chr_data,
+                 aes(x = Host_Start/1000, xend = Host_Start/1000,
+                     y = 0.5, yend = 1.5,
+                     color = Mouse),
+                 size = 0.8, alpha = 0.9, show.legend = show_legend) +
+    
+    # Manual colors and legend
+    scale_color_manual(
+      values = colors_to_use,
+      breaks = names(colors_to_use),
+      limits = names(colors_to_use),
+      drop = FALSE,
+      name = "Mouse"
+    ) +
+    
+    # Axis scales
+    scale_x_continuous(name = "Position (kb)", 
+                       limits = c(min_pos/1000, max_pos/1000),
+                       expand = c(0.01, 0),
+                       labels = function(x) format(as.integer(x), big.mark = ",")) +
+    scale_y_continuous(limits = c(0, 2), 
+                       breaks = 1,
+                       labels = paste0("Chr", chr_name),
+                       expand = c(0.1, 0.1)) +
+    
+    # Theme
+    theme_minimal() +
+    theme(panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(size = 9, face = "bold"),
+          axis.title.y = element_blank(),
+          axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0)),
+          plot.margin = margin(5, 5, 5, 5))
+  
+  if (show_legend) {
+    p <- p + guides(color = guide_legend(
+      override.aes = list(
+        linetype = 1,
+        size = 2,
+        alpha = 1
+      ),
+      keywidth  = unit(0.8, "cm"),
+      keyheight = unit(0.4, "cm")
+    ))
+  }
+  
+  return(p)
+}
+
 # ==========================
 # PLOT 1: Control + SN samples
 # ==========================
 # Filter data for Plot 1
-data_plot1 <- data_spread %>%
+data_plot1 <- data %>%
   filter(Mouse %in% c("Control", "SN-20d-103", "SN-20d-113", "SN-16d-350"))
 
 # Get chromosomes with integrations in THIS plot's data
 chr_with_integrations_plot1 <- unique(data_plot1$Host_Chromosome_clean[!is.na(data_plot1$Host_Chromosome_clean)])
-chr_info_plot1 <- chr_info %>%
-  filter(Chromosome.name %in% chr_with_integrations_plot1) %>%
-  mutate(y_pos_plot = seq_len(n()))
-
-# Update y positions for plot 1 data
-data_plot1 <- data_plot1 %>%
-  left_join(chr_info_plot1 %>% select(Chromosome.name, y_pos_plot), 
-            by = c("Host_Chromosome_clean" = "Chromosome.name")) %>%
-  mutate(y_pos = y_pos_plot) %>%
-  select(-y_pos_plot)
+chr_with_integrations_plot1 <- chr_with_integrations_plot1[order(as.numeric(gsub("[^0-9]", "99", chr_with_integrations_plot1)))]
 
 # Colors for Plot 1
 colors_plot1 <- sample_colors[c("Control", "SN-20d-103", "SN-20d-113", "SN-16d-350")]
-p1 <- ggplot() +
-  # Chromosomes as thick gray bars (using plot1-specific filtered chr_info)
-  geom_segment(data = chr_info_plot1,
-               aes(x = 0, xend = length/1e6, y = y_pos_plot, yend = y_pos_plot),
-               size = 7, color = "grey80") +
+
+# Create subplots for each chromosome
+plot_list1 <- list()
+for (i in seq_along(chr_with_integrations_plot1)) {
+  chr <- chr_with_integrations_plot1[i]
+  chr_data <- data_plot1 %>% filter(Host_Chromosome_clean == chr)
   
-  # Invisible dummy point for Control legend
-  geom_point(data = dummy_control,
-             aes(x = x, y = y, color = Mouse),
-             size = 0, alpha = 0, show.legend = TRUE) +
+  # Only show legend on the first subplot
+  show_legend <- (i == 1)
   
-  # Actual integration site segments
-  geom_segment(data = data_plot1,
-               aes(x = Host_Start_visual/1e6, xend = Host_Start_visual/1e6,
-                   y = y_pos - 0.32, yend = y_pos + 0.32,
-                   color = Mouse),
-               size = 0.8, alpha = 0.9) +
+  plot_list1[[i]] <- create_chr_subplot(chr_data, chr, colors_plot1, show_legend)
+}
+
+# Combine plots using patchwork
+if (length(plot_list1) > 0) {
+  p1 <- wrap_plots(plot_list1, ncol = 1) + 
+    plot_annotation(
+      title = "AAV Integration Sites in Mouse Genome - SN Samples",
+      theme = theme(plot.title = element_text(size = 14, face = "bold"))
+    )
   
-  # Manual colors and legend
-  scale_color_manual(
-    values = colors_plot1,
-    breaks = names(colors_plot1),
-    limits = names(colors_plot1),
-    drop = FALSE,
-    name = "Mouse"
-  ) +
-  guides(color = guide_legend(
-    override.aes = list(
-      linetype = 1,
-      size = 2,
-      alpha = 1
-    ),
-    keywidth  = unit(0.8, "cm"),
-    keyheight = unit(0.4, "cm")
-  )) +
+  print(p1)
   
-  # Axis scales (using plot1-specific filtered chr_info)
-  scale_x_continuous(name = "Position (Mbp)", expand = c(0.01, 0)) +
-  scale_y_continuous(breaks = chr_info_plot1$y_pos_plot,
-                     labels = paste0("Chr", chr_info_plot1$Chromosome),
-                     expand = c(0.05, 0)) +
+  # Adjust height based on number of chromosomes
+  plot_height <- 2 + length(plot_list1) * 1.5
   
-  # Theme
-  theme_minimal() +
-  theme(panel.grid.major.y = element_blank(),
-        panel.grid.major.x = element_blank(),
-        panel.grid.minor = element_blank(),
-        axis.text.y = element_text(size = 9),
-        legend.position = c(0.9, 0.7),
-        legend.background = element_rect(fill = NA, color = NA)) +
-  
-  labs(title = "AAV Integration Sites in Mouse Genome - SN Samples",
-       y = "Chromosome")
-print(p1)
-ggsave("aav_integration_sites_SN_samples.png", plot = p1, 
-       width = 12, height = 8, dpi = 300, 
-       bg = "white")
-cat("Plot 1 saved as 'aav_integration_sites_SN_samples.png'\n")
+  ggsave("aav_integration_sites_SN_samples.png", plot = p1, 
+         width = 12, height = plot_height, dpi = 300, 
+         bg = "white")
+  cat("Plot 1 saved as 'aav_integration_sites_SN_samples.png'\n")
+}
+
 # ==========================
 # PLOT 2: Control + Cas9 sample
 # ==========================
 # Filter data for Plot 2
-data_plot2 <- data_spread %>%
+data_plot2 <- data %>%
   filter(Mouse %in% c("Control", "Cas9-sg6-158"))
 
 # Get chromosomes with integrations in THIS plot's data
 chr_with_integrations_plot2 <- unique(data_plot2$Host_Chromosome_clean[!is.na(data_plot2$Host_Chromosome_clean)])
-chr_info_plot2 <- chr_info %>%
-  filter(Chromosome.name %in% chr_with_integrations_plot2) %>%
-  mutate(y_pos_plot = seq_len(n()))
-
-# Update y positions for plot 2 data
-data_plot2 <- data_plot2 %>%
-  left_join(chr_info_plot2 %>% select(Chromosome.name, y_pos_plot), 
-            by = c("Host_Chromosome_clean" = "Chromosome.name")) %>%
-  mutate(y_pos = y_pos_plot) %>%
-  select(-y_pos_plot)
+chr_with_integrations_plot2 <- chr_with_integrations_plot2[order(as.numeric(gsub("[^0-9]", "99", chr_with_integrations_plot2)))]
 
 # Colors for Plot 2
 colors_plot2 <- sample_colors[c("Control", "Cas9-sg6-158")]
-p2 <- ggplot() +
-  # Chromosomes as thick gray bars (using plot2-specific filtered chr_info)
-  geom_segment(data = chr_info_plot2,
-               aes(x = 0, xend = length/1e6, y = y_pos_plot, yend = y_pos_plot),
-               size = 7, color = "grey80") +
+
+# Create subplots for each chromosome
+plot_list2 <- list()
+for (i in seq_along(chr_with_integrations_plot2)) {
+  chr <- chr_with_integrations_plot2[i]
+  chr_data <- data_plot2 %>% filter(Host_Chromosome_clean == chr)
   
-  # Invisible dummy point for Control legend
-  geom_point(data = dummy_control,
-             aes(x = x, y = y, color = Mouse),
-             size = 0, alpha = 0, show.legend = TRUE) +
+  # Only show legend on the first subplot
+  show_legend <- (i == 1)
   
-  # Actual integration site segments
-  geom_segment(data = data_plot2,
-               aes(x = Host_Start_visual/1e6, xend = Host_Start_visual/1e6,
-                   y = y_pos - 0.32, yend = y_pos + 0.32,
-                   color = Mouse),
-               size = 0.8, alpha = 0.9) +
+  plot_list2[[i]] <- create_chr_subplot(chr_data, chr, colors_plot2, show_legend)
+}
+
+# Combine plots using patchwork
+if (length(plot_list2) > 0) {
+  p2 <- wrap_plots(plot_list2, ncol = 1) + 
+    plot_annotation(
+      title = "AAV Integration Sites in Mouse Genome - Cas9 Sample",
+      theme = theme(plot.title = element_text(size = 14, face = "bold"))
+    )
   
-  # Manual colors and legend
-  scale_color_manual(
-    values = colors_plot2,
-    breaks = names(colors_plot2),
-    limits = names(colors_plot2),
-    drop = FALSE,
-    name = "Mouse"
-  ) +
-  guides(color = guide_legend(
-    override.aes = list(
-      linetype = 1,
-      size = 2,
-      alpha = 1
-    ),
-    keywidth  = unit(0.8, "cm"),
-    keyheight = unit(0.4, "cm")
-  )) +
+  print(p2)
   
-  # Axis scales (using plot2-specific filtered chr_info)
-  scale_x_continuous(name = "Position (Mbp)", expand = c(0.01, 0)) +
-  scale_y_continuous(breaks = chr_info_plot2$y_pos_plot,
-                     labels = paste0("Chr", chr_info_plot2$Chromosome),
-                     expand = c(0.05, 0)) +
+  # Adjust height based on number of chromosomes
+  plot_height <- 2 + length(plot_list2) * 1.5
   
-  # Theme
-  theme_minimal() +
-  theme(panel.grid.major.y = element_blank(),
-        panel.grid.major.x = element_blank(),
-        panel.grid.minor = element_blank(),
-        axis.text.y = element_text(size = 9),
-        legend.position = c(0.9, 0.7),
-        legend.background = element_rect(fill = NA, color = NA)) +
-  
-  labs(title = "AAV Integration Sites in Mouse Genome - Cas9 Sample",
-       y = "Chromosome")
-print(p2)
-ggsave("aav_integration_sites_Cas9_sample.png", plot = p2, 
-       width = 12, height = 8, dpi = 300, 
-       bg = "white")
-cat("Plot 2 saved as 'aav_integration_sites_Cas9_sample.png'\n")
+  ggsave("aav_integration_sites_Cas9_sample.png", plot = p2, 
+         width = 12, height = plot_height, dpi = 300, 
+         bg = "white")
+  cat("Plot 2 saved as 'aav_integration_sites_Cas9_sample.png'\n")
+}
