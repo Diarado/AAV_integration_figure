@@ -2,6 +2,11 @@ library(ggplot2)
 library(dplyr)
 library(patchwork)
 
+# ==========================
+# 1. Data Loading and Preparation
+# ==========================
+
+# Load chromosome length information
 chr_info <- read.table("sequence_report.tsv", header = TRUE, sep = "\t", stringsAsFactors = FALSE) %>%
   filter(Role == "assembled-molecule", Chromosome.name %in% c(1:19, "X", "Y")) %>%
   select(Chromosome.name, Seq.length) %>%
@@ -10,11 +15,46 @@ chr_info <- read.table("sequence_report.tsv", header = TRUE, sep = "\t", strings
     length = as.numeric(Seq.length)
   )
 
+# Load integration site data
 data <- read.csv("integration_sites.csv", stringsAsFactors = FALSE) %>%
   select(Mouse, Host_Chromosome, Host_Start) %>%
   filter(!(Mouse != "Control" & (is.na(Host_Chromosome) | is.na(Host_Start)))) %>%
   mutate(Host_Chromosome_clean = gsub("^Chr", "", Host_Chromosome)) %>%
   left_join(chr_info, by = c("Host_Chromosome_clean" = "Chromosome.name"))
+
+# Define a function to spread out close integration sites for visualization
+spread_close_positions <- function(data, threshold, spread_factor) {
+  data %>%
+    # Important to arrange by position before calculating differences
+    arrange(Host_Chromosome_clean, Host_Start) %>%
+    group_by(Host_Chromosome_clean) %>%
+    # Identify clusters of points closer than the threshold
+    mutate(cluster_id = cumsum(c(0, diff(Host_Start) > threshold))) %>%
+    group_by(Host_Chromosome_clean, cluster_id) %>%
+    # For each cluster, calculate new visual positions
+    mutate(
+      n_in_cluster = n(),
+      cluster_rank = row_number(),
+      # Only spread points if there's more than one in the cluster
+      Host_Start_Visual = if_else(
+        n_in_cluster > 1,
+        # Center the spread points around the mean position of the original cluster
+        mean(Host_Start) + (cluster_rank - (n_in_cluster + 1) / 2) * spread_factor,
+        as.numeric(Host_Start) # Otherwise, use the original position
+      )
+    ) %>%
+    ungroup() %>%
+    select(-cluster_id, -n_in_cluster, -cluster_rank) # Clean up helper columns
+}
+
+# Apply the spreading logic to the dataset
+# A threshold of 50kb defines "close" sites.
+# A spread_factor of 25kb determines the visual spacing between these sites.
+data <- spread_close_positions(data, threshold = 50000, spread_factor = 400)
+
+# ==========================
+# 2. Plotting Setup
+# ==========================
 
 # Define all sample colors
 sample_colors <- c(
@@ -32,9 +72,9 @@ dummy_control <- data.frame(
 
 # Function to create a subplot for a single chromosome
 create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = FALSE) {
-  # Calculate the range with 10kb buffer
-  min_pos <- min(chr_data$Host_Start, na.rm = TRUE) - 1000
-  max_pos <- max(chr_data$Host_Start, na.rm = TRUE) + 1000
+  # Calculate the range based on VISUAL positions with a 50kb buffer
+  min_pos <- min(chr_data$Host_Start_Visual, na.rm = TRUE) - 50000
+  max_pos <- max(chr_data$Host_Start_Visual, na.rm = TRUE) + 50000
   
   # Ensure we don't go below 0
   min_pos <- max(0, min_pos)
@@ -50,12 +90,13 @@ create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = 
                aes(x = x, y = y, color = Mouse),
                size = 0, alpha = 0, show.legend = show_legend) +
     
-    # Actual integration site segments
+    # Actual integration site segments using the VISUAL position
     geom_segment(data = chr_data,
-                 aes(x = Host_Start/1000, xend = Host_Start/1000,
+                 aes(x = Host_Start_Visual/1000, xend = Host_Start_Visual/1000,
                      y = 0.5, yend = 1.5,
                      color = Mouse),
-                 size = 0.8, alpha = 0.9, show.legend = show_legend) +
+                 # MODIFICATION: Increased size for thicker bars
+                 size = 1.5, alpha = 0.9, show.legend = show_legend) +
     
     # Manual colors and legend
     scale_color_manual(
@@ -90,7 +131,8 @@ create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = 
     p <- p + guides(color = guide_legend(
       override.aes = list(
         linetype = 1,
-        size = 2,
+        # Make legend key thicker to match the plot
+        size = 2, 
         alpha = 1
       ),
       keywidth  = unit(0.8, "cm"),
@@ -101,8 +143,9 @@ create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = 
   return(p)
 }
 
+
 # ==========================
-# PLOT 1: Control + SN samples
+# 3. PLOT 1: Control + SN samples
 # ==========================
 # Filter data for Plot 1
 data_plot1 <- data %>%
@@ -131,7 +174,7 @@ for (i in seq_along(chr_with_integrations_plot1)) {
 if (length(plot_list1) > 0) {
   p1 <- wrap_plots(plot_list1, ncol = 1) + 
     plot_annotation(
-      title = "AAV Integration Sites in Mouse Genome - SN Samples",
+      title = "",
       theme = theme(plot.title = element_text(size = 14, face = "bold"))
     )
   
@@ -146,8 +189,9 @@ if (length(plot_list1) > 0) {
   cat("Plot 1 saved as 'aav_integration_sites_SN_samples.png'\n")
 }
 
+
 # ==========================
-# PLOT 2: Control + Cas9 sample
+# 4. PLOT 2: Control + Cas9 sample
 # ==========================
 # Filter data for Plot 2
 data_plot2 <- data %>%
@@ -176,7 +220,7 @@ for (i in seq_along(chr_with_integrations_plot2)) {
 if (length(plot_list2) > 0) {
   p2 <- wrap_plots(plot_list2, ncol = 1) + 
     plot_annotation(
-      title = "AAV Integration Sites in Mouse Genome - Cas9 Sample",
+      title = "",
       theme = theme(plot.title = element_text(size = 14, face = "bold"))
     )
   
