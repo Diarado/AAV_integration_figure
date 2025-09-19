@@ -18,8 +18,21 @@ chr_info <- read.table("sequence_report.tsv", header = TRUE, sep = "\t", strings
 # Load integration site data
 data <- read.csv("integration_sites.csv", stringsAsFactors = FALSE) %>%
   select(Mouse, Host_Chromosome, Host_Start) %>%
-  filter(!(Mouse != "Control" & (is.na(Host_Chromosome) | is.na(Host_Start)))) %>%
-  mutate(Host_Chromosome_clean = gsub("^Chr", "", Host_Chromosome)) %>%
+  filter(!(Mouse != "Control" & (is.na(Host_Chromosome) | is.na(Host_Start))))
+
+# HARDCODED MODIFICATION: Create specific labels for all samples
+data <- data %>%
+  mutate(
+    # Create proper labels for all samples
+    Mouse = case_when(
+      Mouse == "SN-20d-103" ~ "SN-20d-103: 5HA-Fancc-3HA",
+      Mouse == "SN-20d-113" ~ "SN-20d-113: 5HA-Fancc-3HA",
+      Mouse == "Cas9-sg6-158" & Host_Start >= 127500 & Host_Start <= 127800 ~ "Cas9-sg6-158: 5HA-Fancc",
+      Mouse == "Cas9-sg6-158" ~ "Cas9-sg6-158: ITR-3HA",
+      TRUE ~ Mouse
+    ),
+    Host_Chromosome_clean = gsub("^Chr", "", Host_Chromosome)
+  ) %>%
   left_join(chr_info, by = c("Host_Chromosome_clean" = "Chromosome.name"))
 
 # Define a function to spread out close integration sites for visualization
@@ -50,19 +63,19 @@ spread_close_positions <- function(data, threshold, spread_factor) {
 # Apply the spreading logic to the dataset
 # A threshold of 50kb defines "close" sites.
 # A spread_factor of 25kb determines the visual spacing between these sites.
-data <- spread_close_positions(data, threshold = 50000, spread_factor = 400)
+data <- spread_close_positions(data, threshold = 50000, spread_factor = 480000)
 
 # ==========================
 # 2. Plotting Setup
 # ==========================
 
-# Define all sample colors
+# Define all sample colors - NOW INCLUDING THE NEW LABEL
 sample_colors <- c(
   "Control" = "black",
-  "SN-20d-103" = "#E41A1C",
-  "SN-20d-113" = "#377EB8",
-  "Cas9-sg6-158" = "#4DAF4A",
-  "SN-16d-350" = "#984EA3"
+  "SN-20d-103: 5HA-Fancc-3HA" = "#E41A1C",
+  "SN-20d-113: 5HA-Fancc-3HA" = "#377EB8",
+  "Cas9-sg6-158: ITR-3HA" = "#4DAF4A",           # Original green
+  "Cas9-sg6-158: 5HA-Fancc" = "#2D7F2D"          # Darker green
 )
 
 # Create dummy control data for legend
@@ -72,9 +85,8 @@ dummy_control <- data.frame(
 
 # Function to create a subplot for a single chromosome
 create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = FALSE) {
-  # Calculate the range based on VISUAL positions with a 50kb buffer
-  min_pos <- min(chr_data$Host_Start_Visual, na.rm = TRUE) - 50000
-  max_pos <- max(chr_data$Host_Start_Visual, na.rm = TRUE) + 50000
+  min_pos <- min(chr_data$Host_Start_Visual, na.rm = TRUE) - 127515
+  max_pos <- max(chr_data$Host_Start_Visual, na.rm = TRUE) + 50000000
   
   # Ensure we don't go below 0
   min_pos <- max(0, min_pos)
@@ -95,7 +107,7 @@ create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = 
                  aes(x = Host_Start_Visual/1000, xend = Host_Start_Visual/1000,
                      y = 0.5, yend = 1.5,
                      color = Mouse),
-                 # MODIFICATION: Increased size for thicker bars
+                 # Increased size for thicker bars
                  size = 1.5, alpha = 0.9, show.legend = show_legend) +
     
     # Manual colors and legend
@@ -145,92 +157,59 @@ create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = 
 
 
 # ==========================
-# 3. PLOT 1: Control + SN samples
+# 3. COMBINED PLOT: All samples together
 # ==========================
-# Filter data for Plot 1
-data_plot1 <- data %>%
-  filter(Mouse %in% c("Control", "SN-20d-103", "SN-20d-113", "SN-16d-350"))
 
-# Get chromosomes with integrations in THIS plot's data
-chr_with_integrations_plot1 <- unique(data_plot1$Host_Chromosome_clean[!is.na(data_plot1$Host_Chromosome_clean)])
-chr_with_integrations_plot1 <- chr_with_integrations_plot1[order(as.numeric(gsub("[^0-9]", "99", chr_with_integrations_plot1)))]
+# Filter data for all samples we want to include
+# Note: The Mouse column now has the modified labels for Cas9-sg6-158
+data_combined <- data %>%
+  filter(Mouse %in% names(sample_colors))
 
-# Colors for Plot 1
-colors_plot1 <- sample_colors[c("Control", "SN-20d-103", "SN-20d-113", "SN-16d-350")]
+# Get chromosomes with integrations
+chr_with_integrations <- unique(data_combined$Host_Chromosome_clean[!is.na(data_combined$Host_Chromosome_clean)])
+chr_with_integrations <- chr_with_integrations[order(as.numeric(gsub("[^0-9]", "99", chr_with_integrations)))]
+
+# Use all colors
+colors_combined <- sample_colors
 
 # Create subplots for each chromosome
-plot_list1 <- list()
-for (i in seq_along(chr_with_integrations_plot1)) {
-  chr <- chr_with_integrations_plot1[i]
-  chr_data <- data_plot1 %>% filter(Host_Chromosome_clean == chr)
+plot_list <- list()
+for (i in seq_along(chr_with_integrations)) {
+  chr <- chr_with_integrations[i]
+  chr_data <- data_combined %>% filter(Host_Chromosome_clean == chr)
   
   # Only show legend on the first subplot
   show_legend <- (i == 1)
   
-  plot_list1[[i]] <- create_chr_subplot(chr_data, chr, colors_plot1, show_legend)
+  plot_list[[i]] <- create_chr_subplot(chr_data, chr, colors_combined, show_legend)
 }
 
 # Combine plots using patchwork
-if (length(plot_list1) > 0) {
-  p1 <- wrap_plots(plot_list1, ncol = 1) + 
+if (length(plot_list) > 0) {
+  p_combined <- wrap_plots(plot_list, ncol = 1) + 
     plot_annotation(
+      # title = "AAV Integration Sites - All Samples",
       title = "",
       theme = theme(plot.title = element_text(size = 14, face = "bold"))
     )
   
-  print(p1)
+  print(p_combined)
   
   # Adjust height based on number of chromosomes
-  plot_height <- 2 + length(plot_list1) * 1.5
+  plot_height <- 2 + length(plot_list) * 1.5
   
-  ggsave("aav_integration_sites_SN_samples.png", plot = p1, 
+  ggsave("aav_integration_sites_all_samples.png", plot = p_combined, 
          width = 12, height = plot_height, dpi = 300, 
          bg = "white")
-  cat("Plot 1 saved as 'aav_integration_sites_SN_samples.png'\n")
+  cat("Combined plot saved as 'aav_integration_sites_all_samples.png'\n")
 }
 
-
-# ==========================
-# 4. PLOT 2: Control + Cas9 sample
-# ==========================
-# Filter data for Plot 2
-data_plot2 <- data %>%
-  filter(Mouse %in% c("Control", "Cas9-sg6-158"))
-
-# Get chromosomes with integrations in THIS plot's data
-chr_with_integrations_plot2 <- unique(data_plot2$Host_Chromosome_clean[!is.na(data_plot2$Host_Chromosome_clean)])
-chr_with_integrations_plot2 <- chr_with_integrations_plot2[order(as.numeric(gsub("[^0-9]", "99", chr_with_integrations_plot2)))]
-
-# Colors for Plot 2
-colors_plot2 <- sample_colors[c("Control", "Cas9-sg6-158")]
-
-# Create subplots for each chromosome
-plot_list2 <- list()
-for (i in seq_along(chr_with_integrations_plot2)) {
-  chr <- chr_with_integrations_plot2[i]
-  chr_data <- data_plot2 %>% filter(Host_Chromosome_clean == chr)
-  
-  # Only show legend on the first subplot
-  show_legend <- (i == 1)
-  
-  plot_list2[[i]] <- create_chr_subplot(chr_data, chr, colors_plot2, show_legend)
-}
-
-# Combine plots using patchwork
-if (length(plot_list2) > 0) {
-  p2 <- wrap_plots(plot_list2, ncol = 1) + 
-    plot_annotation(
-      title = "",
-      theme = theme(plot.title = element_text(size = 14, face = "bold"))
-    )
-  
-  print(p2)
-  
-  # Adjust height based on number of chromosomes
-  plot_height <- 2 + length(plot_list2) * 1.5
-  
-  ggsave("aav_integration_sites_Cas9_sample.png", plot = p2, 
-         width = 12, height = plot_height, dpi = 300, 
-         bg = "white")
-  cat("Plot 2 saved as 'aav_integration_sites_Cas9_sample.png'\n")
-}
+# Print summary to verify the labeling
+cat("\n=== Summary of Integration Sites ===\n")
+data_combined %>%
+  group_by(Mouse) %>%
+  summarise(
+    Count = n(),
+    Positions = paste(Host_Start, collapse = ", ")
+  ) %>%
+  print()
