@@ -23,15 +23,17 @@ data <- read.csv("integration_sites.csv", stringsAsFactors = FALSE) %>%
 # HARDCODED MODIFICATION: Create specific labels for all samples
 data <- data %>%
   mutate(
-    # Create proper labels for all samples
+    Host_Chromosome_clean = gsub("^Chr", "", Host_Chromosome),
+    # Create proper labels for all samples with explicit hardcoding for Cas9
     Mouse = case_when(
       Mouse == "SN-20d-103" ~ "SN-20d-103: 5HA-Fancc-3HA",
       Mouse == "SN-20d-113" ~ "SN-20d-113: 5HA-Fancc-3HA",
-      Mouse == "Cas9-sg6-158" & Host_Start >= 127500 & Host_Start <= 127800 ~ "Cas9-sg6-158: 5HA-Fancc",
-      Mouse == "Cas9-sg6-158" ~ "Cas9-sg6-158: ITR-3HA",
+      # Hardcode the three Cas9-sg6-158 samples based on their specific positions
+      Mouse == "Cas9-sg6-158" & Host_Start == 63550724 ~ "Cas9-sg6-158: Fancc-3HA-ITR",  # Fancc on Chr13
+      Mouse == "Cas9-sg6-158" & Host_Start == 63550004 ~ "Cas9-sg6-158: Fancc-3HA-ITR",  # 3HA-ITR on Chr13  
+      Mouse == "Cas9-sg6-158" & Host_Start == 26412211 ~ "Cas9-sg6-158: sk-polyA", # sk-polyA on Chr3
       TRUE ~ Mouse
-    ),
-    Host_Chromosome_clean = gsub("^Chr", "", Host_Chromosome)
+    )
   ) %>%
   left_join(chr_info, by = c("Host_Chromosome_clean" = "Chromosome.name"))
 
@@ -51,19 +53,47 @@ spread_close_positions <- function(data, threshold, spread_factor) {
       # Only spread points if there's more than one in the cluster
       Host_Start_Visual = if_else(
         n_in_cluster > 1,
-        # Center the spread points around the mean position of the original cluster
+        # Create evenly spaced positions around the mean, with consistent spacing
         mean(Host_Start) + (cluster_rank - (n_in_cluster + 1) / 2) * spread_factor,
         as.numeric(Host_Start) # Otherwise, use the original position
       )
     ) %>%
     ungroup() %>%
-    select(-cluster_id, -n_in_cluster, -cluster_rank) # Clean up helper columns
+    # Additional step: ensure all sites within a chromosome have consistent minimal spacing
+    group_by(Host_Chromosome_clean) %>%
+    arrange(Host_Start_Visual) %>%
+    mutate(
+      # Calculate the difference between consecutive visual positions
+      pos_diff = c(Inf, diff(Host_Start_Visual)),
+      # If the difference is less than spread_factor, adjust to maintain consistent spacing
+      Host_Start_Visual = cumsum(c(first(Host_Start_Visual), 
+                                   pmax(diff(Host_Start_Visual), spread_factor)[-length(Host_Start_Visual)]))
+    ) %>%
+    select(-cluster_id, -n_in_cluster, -cluster_rank, -pos_diff) %>% # Clean up helper columns
+    ungroup()
 }
 
 # Apply the spreading logic to the dataset
 # A threshold of 50kb defines "close" sites.
-# A spread_factor of 25kb determines the visual spacing between these sites.
-data <- spread_close_positions(data, threshold = 50000, spread_factor = 480000)
+# A spread_factor of 480kb determines the visual spacing between these sites.
+data <- spread_close_positions(data, threshold = 50000, spread_factor = 100000)
+
+# HARDCODED FIX: For SN samples, manually adjust positions to ensure even spacing
+# Create evenly spaced positions for all 6 integration sites
+data <- data %>%
+  group_by(Mouse, Host_Chromosome_clean) %>%
+  mutate(
+    Host_Start_Visual = case_when(
+      # For SN samples on Chr13, create evenly spaced positions
+      Mouse == "SN-20d-103: 5HA-Fancc-3HA" & Host_Chromosome_clean == "13" ~ 
+        63000000 + (row_number() - 1) * 400000,  # 2 sites: 63000000, 63400000
+      Mouse == "SN-20d-113: 5HA-Fancc-3HA" & Host_Chromosome_clean == "13" ~ 
+        63800000 + (row_number() - 1) * 400000,  # 4 sites: 63800000, 64200000, 64600000, 65000000
+      # Keep all other positions as they were
+      TRUE ~ Host_Start_Visual
+    )
+  ) %>%
+  ungroup()
 
 # ==========================
 # 2. Plotting Setup
@@ -74,8 +104,8 @@ sample_colors <- c(
   "Control" = "black",
   "SN-20d-103: 5HA-Fancc-3HA" = "#E41A1C",
   "SN-20d-113: 5HA-Fancc-3HA" = "#377EB8",
-  "Cas9-sg6-158: ITR-3HA" = "#4DAF4A",           # Original green
-  "Cas9-sg6-158: 5HA-Fancc" = "#2D7F2D"          # Darker green
+  "Cas9-sg6-158: Fancc-3HA-ITR" = "#2D7F2D",           # Original green
+  "Cas9-sg6-158: sk-polyA" = "#4DAF4A"           # Darker green
 )
 
 # Create dummy control data for legend
@@ -85,7 +115,7 @@ dummy_control <- data.frame(
 
 # Function to create a subplot for a single chromosome
 create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = FALSE) {
-  min_pos <- min(chr_data$Host_Start_Visual, na.rm = TRUE) - 127515
+  min_pos <- min(chr_data$Host_Start_Visual, na.rm = TRUE) - 50000000
   max_pos <- max(chr_data$Host_Start_Visual, na.rm = TRUE) + 50000000
   
   # Ensure we don't go below 0
@@ -155,58 +185,136 @@ create_chr_subplot <- function(chr_data, chr_name, colors_to_use, show_legend = 
   return(p)
 }
 
+# Function to create an empty placeholder subplot
+create_empty_subplot <- function() {
+  ggplot() +
+    theme_void() +
+    theme(plot.margin = margin(5, 5, 5, 5))
+}
 
 # ==========================
-# 3. COMBINED PLOT: All samples together
+# 3. PLOT 1: Cas9-sg6-158 and Control
 # ==========================
 
-# Filter data for all samples we want to include
-# Note: The Mouse column now has the modified labels for Cas9-sg6-158
-data_combined <- data %>%
-  filter(Mouse %in% names(sample_colors))
+cat("Creating Plot 1: Cas9-sg6-158 samples and Control\n")
 
-# Get chromosomes with integrations
-chr_with_integrations <- unique(data_combined$Host_Chromosome_clean[!is.na(data_combined$Host_Chromosome_clean)])
-chr_with_integrations <- chr_with_integrations[order(as.numeric(gsub("[^0-9]", "99", chr_with_integrations)))]
+# Filter data for Cas9-sg6-158 and Control
+data_cas9 <- data %>%
+  filter(Mouse %in% c("Control", "Cas9-sg6-158: Fancc-3HA-ITR", "Cas9-sg6-158: sk-polyA"))
 
-# Use all colors
-colors_combined <- sample_colors
+# Define colors for this plot
+colors_cas9 <- sample_colors[c("Control", "Cas9-sg6-158: Fancc-3HA-ITR", "Cas9-sg6-158: sk-polyA")]
+
+# Get chromosomes with integrations for Cas9
+chr_with_integrations_cas9 <- unique(data_cas9$Host_Chromosome_clean[!is.na(data_cas9$Host_Chromosome_clean)])
+chr_with_integrations_cas9 <- chr_with_integrations_cas9[order(as.numeric(gsub("[^0-9]", "99", chr_with_integrations_cas9)))]
 
 # Create subplots for each chromosome
-plot_list <- list()
-for (i in seq_along(chr_with_integrations)) {
-  chr <- chr_with_integrations[i]
-  chr_data <- data_combined %>% filter(Host_Chromosome_clean == chr)
+plot_list_cas9 <- list()
+for (i in seq_along(chr_with_integrations_cas9)) {
+  chr <- chr_with_integrations_cas9[i]
+  chr_data <- data_cas9 %>% filter(Host_Chromosome_clean == chr)
   
   # Only show legend on the first subplot
   show_legend <- (i == 1)
   
-  plot_list[[i]] <- create_chr_subplot(chr_data, chr, colors_combined, show_legend)
+  plot_list_cas9[[i]] <- create_chr_subplot(chr_data, chr, colors_cas9, show_legend)
 }
 
-# Combine plots using patchwork
-if (length(plot_list) > 0) {
-  p_combined <- wrap_plots(plot_list, ncol = 1) + 
+# Store the number of chromosomes in Cas9 plot for reference
+n_chr_cas9 <- length(plot_list_cas9)
+
+# Combine plots for Cas9
+if (length(plot_list_cas9) > 0) {
+  p_cas9 <- wrap_plots(plot_list_cas9, ncol = 1) + 
     plot_annotation(
-      # title = "AAV Integration Sites - All Samples",
       title = "",
       theme = theme(plot.title = element_text(size = 14, face = "bold"))
     )
   
-  print(p_combined)
+  print(p_cas9)
   
   # Adjust height based on number of chromosomes
-  plot_height <- 2 + length(plot_list) * 1.5
+  plot_height_cas9 <- 2 + length(plot_list_cas9) * 1.5
   
-  ggsave("aav_integration_sites_all_samples.png", plot = p_combined, 
-         width = 12, height = plot_height, dpi = 300, 
+  ggsave("aav_integration_sites_cas9.png", plot = p_cas9, 
+         width = 12, height = plot_height_cas9, dpi = 300, 
          bg = "white")
-  cat("Combined plot saved as 'aav_integration_sites_all_samples.png'\n")
+  cat("Cas9 plot saved as 'aav_integration_sites_cas9.png'\n\n")
 }
 
-# Print summary to verify the labeling
-cat("\n=== Summary of Integration Sites ===\n")
-data_combined %>%
+# ==========================
+# 4. PLOT 2: SN-20d-103, SN-20d-113, and Control
+# ==========================
+
+cat("Creating Plot 2: SN-20d samples and Control\n")
+
+# Filter data for SN samples and Control
+data_sn <- data %>%
+  filter(Mouse %in% c("Control", "SN-20d-103: 5HA-Fancc-3HA", "SN-20d-113: 5HA-Fancc-3HA"))
+
+# Define colors for this plot
+colors_sn <- sample_colors[c("Control", "SN-20d-103: 5HA-Fancc-3HA", "SN-20d-113: 5HA-Fancc-3HA")]
+
+# Get chromosomes with integrations for SN samples
+chr_with_integrations_sn <- unique(data_sn$Host_Chromosome_clean[!is.na(data_sn$Host_Chromosome_clean)])
+chr_with_integrations_sn <- chr_with_integrations_sn[order(as.numeric(gsub("[^0-9]", "99", chr_with_integrations_sn)))]
+
+# Create subplots for each chromosome
+plot_list_sn <- list()
+for (i in seq_along(chr_with_integrations_sn)) {
+  chr <- chr_with_integrations_sn[i]
+  chr_data <- data_sn %>% filter(Host_Chromosome_clean == chr)
+  
+  # Only show legend on the first subplot
+  show_legend <- (i == 1)
+  
+  plot_list_sn[[i]] <- create_chr_subplot(chr_data, chr, colors_sn, show_legend)
+}
+
+# Add empty placeholder subplots to match the number of subplots in Cas9 plot
+n_chr_sn <- length(plot_list_sn)
+if (n_chr_sn < n_chr_cas9) {
+  n_empty_plots <- n_chr_cas9 - n_chr_sn
+  for (j in 1:n_empty_plots) {
+    plot_list_sn[[n_chr_sn + j]] <- create_empty_subplot()
+  }
+}
+
+# Combine plots for SN samples
+if (length(plot_list_sn) > 0) {
+  p_sn <- wrap_plots(plot_list_sn, ncol = 1) + 
+    plot_annotation(
+      title = "",
+      theme = theme(plot.title = element_text(size = 14, face = "bold"))
+    )
+  
+  print(p_sn)
+  
+  # Use the same height calculation as Cas9 plot for consistency
+  plot_height_sn <- 2 + n_chr_cas9 * 1.5
+  
+  ggsave("aav_integration_sites_sn.png", plot = p_sn, 
+         width = 12, height = plot_height_sn, dpi = 300, 
+         bg = "white")
+  cat("SN samples plot saved as 'aav_integration_sites_sn.png'\n\n")
+}
+
+# ==========================
+# 5. Print summaries for both plots
+# ==========================
+
+cat("=== Summary of Cas9-sg6-158 Integration Sites ===\n")
+data_cas9 %>%
+  group_by(Mouse) %>%
+  summarise(
+    Count = n(),
+    Positions = paste(Host_Start, collapse = ", ")
+  ) %>%
+  print()
+
+cat("\n=== Summary of SN-20d Integration Sites ===\n")
+data_sn %>%
   group_by(Mouse) %>%
   summarise(
     Count = n(),
